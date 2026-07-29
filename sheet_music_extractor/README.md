@@ -14,11 +14,13 @@ El pipeline consta de las siguientes etapas:
 | Módulo | Responsabilidad |
 | --- | --- |
 | `downloader.py` | Descarga el vídeo con `yt-dlp` y obtiene sus metadatos. |
-| `frame_extractor.py` | Muestrea frames y deduplica usando SSIM (scikit-image). |
-| `ocr_engine.py` | Reconoce el título con Tesseract para nombrar el PDF. |
+| `frame_extractor.py` | Muestrea a `fps_sample`, detecta frames estables y captura páginas (SSIM). |
+| `staff_detector.py` | Detecta los pentagramas (staff lines) de cada frame. |
+| `ocr_engine.py` | Reconoce el título y los símbolos de acorde con Tesseract. |
+| `annotator.py` | Dibuja los acordes detectados sobre cada página. |
 | `omr_engine.py` | (Opcional) Convierte cada página a MusicXML con `oemer`. |
-| `comparator.py` | (Opcional) Elimina duplicados comparando la música con `musicdiff`. |
-| `pdf_generator.py` | Combina las páginas en un PDF con `img2pdf`. |
+| `comparator.py` | (Opcional) Compara la partitura reconocida con una de referencia (`musicdiff`). |
+| `pdf_generator.py` | Combina las páginas en un PDF a `pdf_dpi` con `img2pdf`. |
 | `pipeline.py` | Orquesta todas las etapas. |
 | `app.py` | Interfaz web con Gradio (punto de entrada). |
 | `config.py` | Configuración central del pipeline. |
@@ -26,12 +28,17 @@ El pipeline consta de las siguientes etapas:
 ### Flujo
 
 ```
-URL ─▶ Descarga ─▶ Extracción de frames ─▶ Deduplicación ─▶ OCR (título)
-                                                              │
-                              ┌───────────────────────────────┘
+URL ─▶ Descarga ─▶ Extracción de páginas ─▶ OCR título + acordes ─▶ Anotación
+        (yt-dlp)   (estabilidad + pentagrama)                          │
+                              ┌────────────────────────────────────────┘
                               ▼
-                 OMR + dedupe musical (opcional) ─▶ PDF
+        OMR (oemer) ─▶ Comparación con referencia (opcional) ─▶ PDF
 ```
+
+Una página sólo se captura cuando el frame ha sido **estable** durante
+`min_stable_frames` muestras consecutivas **y** contiene un **pentagrama**
+(al menos `min_staff_lines` líneas). Esto descarta portadas, transiciones y
+frames borrosos.
 
 ## Instalación
 
@@ -84,29 +91,43 @@ páginas detectadas.
 from config import Config
 import pipeline
 
-config = Config(frame_interval_sec=1.0, ssim_threshold=0.92)
-result = pipeline.run("https://www.youtube.com/watch?v=XXXX", config)
+config = Config(
+    youtube_url="https://www.youtube.com/watch?v=XXXX",
+    fps_sample=2.0,
+    ssim_threshold=0.88,
+    detect_chords=True,
+    enable_omr=False,               # activa oemer si quieres MusicXML
+    reference_score_path="",        # opcional: comparar con una partitura
+)
+result = pipeline.run(config)
 
 print(result.num_pages, "páginas en", result.pdf_path)
 ```
 
 ## Ajuste de parámetros
 
-- **`frame_interval_sec`**: cada cuántos segundos se analiza un frame. Bájalo
-  si el vídeo cambia de página rápido; súbelo para acelerar el proceso.
+- **`fps_sample`**: frames por segundo a analizar. Súbelo si el vídeo cambia
+  de página rápido; bájalo para acelerar.
 - **`ssim_threshold`** (0–1): similitud a partir de la cual dos frames se
   consideran la misma página. Súbelo si se pierden páginas parecidas; bájalo
   si aparecen duplicados.
-- **`crop_*`**: recortes relativos para quitar barras, marcas de agua o
-  interfaces del reproductor antes de comparar.
-- **`omr_enabled` / `use_omr_dedup`**: activa OMR para deduplicar por
-  contenido musical además de por apariencia visual (lento).
+- **`min_stable_frames`**: muestras estables consecutivas antes de capturar
+  una página (evita frames de transición).
+- **`min_staff_lines` / `staff_line_min_width`**: sensibilidad de la detección
+  de pentagramas.
+- **`detect_chords` / `annotate_chords` / `chord_region_offset`**: detección de
+  acordes por OCR encima del pentagrama y su dibujo sobre la página.
+- **`enable_omr` / `omr_use_tf` / `omr_without_deskew`**: reconocimiento de
+  notas a MusicXML con oemer (lento).
+- **`reference_score_path` / `comparison_details`**: comparación de la
+  partitura reconocida con una de referencia mediante `musicdiff`.
+- **`pdf_dpi`**: resolución de las páginas del PDF final.
 
 ## Notas
 
 - Funciona mejor con vídeos de tipo *page-turn* (una página fija durante unos
-  segundos). Los vídeos con scroll continuo pueden requerir ajustar el
-  intervalo y el umbral.
+  segundos). Los vídeos con scroll continuo pueden requerir ajustar
+  `fps_sample` y `ssim_threshold`.
 - Todas las etapas basadas en dependencias opcionales (OCR, OMR, comparación
   musical) degradan con elegancia: si la herramienta no está instalada, el
   pipeline continúa sin ella.
@@ -119,7 +140,9 @@ sheet_music_extractor/
 ├── config.py
 ├── downloader.py
 ├── frame_extractor.py
+├── staff_detector.py
 ├── ocr_engine.py
+├── annotator.py
 ├── omr_engine.py
 ├── comparator.py
 ├── pdf_generator.py

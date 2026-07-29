@@ -1,19 +1,19 @@
-"""Extracción y deduplicación de frames de vídeo.
+"""
+frame_extractor.py — Extracción de páginas de partitura desde el vídeo.
 
-La estrategia es sencilla y robusta para vídeos tipo "pasa-páginas" o
-"scroll" de partituras:
+Estrategia para vídeos tipo "pasa-páginas":
 
-1. Se muestrea un frame cada ``frame_interval_sec`` segundos.
-2. Cada frame se recorta (según la config), se pasa a gris y se reduce.
-3. Se compara con el último frame *aceptado* usando SSIM. Si la similitud
-   cae por debajo del umbral, se considera una página nueva.
-4. Una segunda pasada global elimina páginas que reaparecen más tarde
-   (p. ej. una repetición del estribillo mostrada dos veces).
+1. Se muestrea a ``fps_sample`` fotogramas por segundo.
+2. Un frame se considera *estable* cuando se parece (SSIM) al frame muestreado
+   anterior. Tras ``min_stable_frames`` muestras estables consecutivas, el
+   frame es candidato a página (evita capturar transiciones borrosas).
+3. El candidato se acepta como página nueva sólo si contiene un pentagrama
+   (``staff_detector``) y difiere de la última página capturada.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -21,120 +21,116 @@ import cv2
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
 
+import staff_detector
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Optional[Callable[[float, str], None]]
 
+# Tamaño reducido usado para las comparaciones SSIM (rápido y estable).
+COMPARE_SIZE = (320, 180)
+
 
 @dataclass
-class Frame:
-    """Un frame extraído del vídeo."""
+class Page:
+    """Una página de partitura capturada del vídeo."""
 
     index: int          # índice del frame en el vídeo original
     timestamp: float    # segundos desde el inicio
-    image: np.ndarray   # imagen BGR ya recortada
+    image: np.ndarray   # imagen BGR
 
     @property
     def gray(self) -> np.ndarray:
         return cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
 
 
-def _crop(image: np.ndarray, config: Config) -> np.ndarray:
-    """Aplica los recortes relativos definidos en la configuración."""
-    h, w = image.shape[:2]
-    top = int(round(h * config.crop_top))
-    bottom = int(round(h * (1.0 - config.crop_bottom)))
-    left = int(round(w * config.crop_left))
-    right = int(round(w * (1.0 - config.crop_right)))
-    # Salvaguarda: evita recortes degenerados.
-    if bottom <= top or right <= left:
-        return image
-    return image[top:bottom, left:right]
+def _prepare(image: np.ndarray) -> np.ndarray:
+    """Convierte a gris reducido para comparar con SSIM."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    return cv2.resize(gray, COMPARE_SIZE, interpolation=cv2.INTER_AREA)
 
 
-def _prepare(gray: np.ndarray, config: Config) -> np.ndarray:
-    """Reduce una imagen en gris al tamaño de comparación."""
-    return cv2.resize(gray, config.resize_for_compare, interpolation=cv2.INTER_AREA)
+def _similar(a: np.ndarray, b: np.ndarray, threshold: float) -> bool:
+    return float(ssim(a, b)) > threshold
 
 
-def _similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """SSIM entre dos imágenes en gris ya normalizadas al mismo tamaño."""
-    score = ssim(a, b)
-    return float(score)
-
-
-def extract_unique_frames(
+def extract_pages(
     video_path: Path,
     config: Config,
     progress: ProgressCallback = None,
-) -> List[Frame]:
-    """Extrae los frames distintos de ``video_path``.
-
-    Devuelve la lista de frames candidatos (una por página detectada),
-    ya deduplicados frente al frame inmediatamente anterior.
-    """
+) -> List[Page]:
+    """Extrae las páginas de partitura distintas de ``video_path``."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"No se pudo abrir el vídeo: {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    step = max(int(round(fps * config.frame_interval_sec)), 1)
+    step = max(int(round(fps / max(config.fps_sample, 0.01))), 1)
 
-    unique: List[Frame] = []
-    last_small: Optional[np.ndarray] = None
+    config.frames_dir.mkdir(parents=True, exist_ok=True)
+
+    pages: List[Page] = []
+    prev_small: Optional[np.ndarray] = None       # muestra anterior
+    candidate: Optional[Page] = None              # frame estable en observación
+    last_page_small: Optional[np.ndarray] = None  # última página aceptada
+    stable_count = 0
     idx = 0
+    sample_n = 0
 
     try:
         while True:
-            grabbed = cap.grab()
-            if not grabbed:
+            if not cap.grab():
                 break
             if idx % step == 0:
-                ok, raw = cap.retrieve()
-                if ok and raw is not None:
-                    cropped = _crop(raw, config)
-                    small = _prepare(cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY), config)
-                    if last_small is None or _similarity(last_small, small) < config.ssim_threshold:
-                        unique.append(
-                            Frame(index=idx, timestamp=idx / fps, image=cropped)
+                ok, frame = cap.retrieve()
+                if ok and frame is not None:
+                    small = _prepare(frame)
+
+                    if prev_small is not None and _similar(prev_small, small, config.ssim_threshold):
+                        stable_count += 1
+                    else:
+                        stable_count = 1
+                        candidate = Page(index=idx, timestamp=idx / fps, image=frame)
+                    prev_small = small
+
+                    # Guarda cada frame muestreado (útil para depurar).
+                    cv2.imwrite(str(config.frames_dir / f"frame_{sample_n:05d}.png"), frame)
+                    sample_n += 1
+
+                    # ¿Frame estable el tiempo suficiente y con pentagrama?
+                    if (
+                        candidate is not None
+                        and stable_count == config.min_stable_frames
+                        and staff_detector.has_staff(candidate.image, config)
+                    ):
+                        is_new = last_page_small is None or not _similar(
+                            last_page_small, small, config.ssim_threshold
                         )
-                        last_small = small
+                        if is_new:
+                            pages.append(candidate)
+                            last_page_small = small
+                            logger.info(
+                                "Página %d capturada en t=%.1fs", len(pages), candidate.timestamp
+                            )
+
                 if progress and total:
-                    progress(min(idx / total, 1.0), f"Extrayendo frames… ({len(unique)} páginas)")
+                    progress(min(idx / total, 1.0), f"Extrayendo frames… ({len(pages)} páginas)")
             idx += 1
     finally:
         cap.release()
 
-    logger.info("Frames muestreados: %d páginas candidatas", len(unique))
-    return unique
+    logger.info("Total de páginas capturadas: %d", len(pages))
+    return pages
 
 
-def deduplicate_frames(frames: List[Frame], config: Config) -> List[Frame]:
-    """Elimina frames que se parezcan a *cualquier* frame ya conservado.
-
-    Complementa a :func:`extract_unique_frames`, que sólo compara con el
-    frame anterior, capturando duplicados no consecutivos.
-    """
-    kept: List[Frame] = []
-    kept_small: List[np.ndarray] = []
-    for frame in frames:
-        small = _prepare(frame.gray, config)
-        if all(_similarity(small, ref) < config.ssim_threshold for ref in kept_small):
-            kept.append(frame)
-            kept_small.append(small)
-    logger.info("Tras deduplicación global: %d páginas únicas", len(kept))
-    return kept
-
-
-def save_frames(frames: List[Frame], out_dir: Path) -> List[Path]:
-    """Guarda cada frame como PNG numerado y devuelve las rutas."""
+def save_pages(pages: List[Page], out_dir: Path) -> List[Path]:
+    """Guarda cada página como PNG numerado y devuelve las rutas."""
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: List[Path] = []
-    for i, frame in enumerate(frames, start=1):
+    for i, page in enumerate(pages, start=1):
         path = out_dir / f"page_{i:03d}.png"
-        cv2.imwrite(str(path), frame.image)
+        cv2.imwrite(str(path), page.image)
         paths.append(path)
     return paths

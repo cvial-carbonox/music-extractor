@@ -1,4 +1,5 @@
-"""Interfaz web con Gradio (punto de entrada).
+"""
+app.py — Interfaz web con Gradio (punto de entrada).
 
 Ejecuta::
 
@@ -25,10 +26,12 @@ logger = logging.getLogger(__name__)
 
 def process(
     url: str,
-    frame_interval: float,
+    fps_sample: float,
     ssim_threshold: float,
-    ocr_enabled: bool,
-    omr_enabled: bool,
+    min_stable_frames: int,
+    detect_chords: bool,
+    enable_omr: bool,
+    reference_file,
     progress: gr.Progress = gr.Progress(),
 ):
     """Callback del botón: ejecuta el pipeline y devuelve PDF + galería."""
@@ -36,26 +39,32 @@ def process(
         raise gr.Error("Introduce una URL de vídeo válida.")
 
     config = Config(
-        frame_interval_sec=float(frame_interval),
+        youtube_url=url.strip(),
+        fps_sample=float(fps_sample),
         ssim_threshold=float(ssim_threshold),
-        ocr_enabled=bool(ocr_enabled),
-        omr_enabled=bool(omr_enabled),
-        use_omr_dedup=bool(omr_enabled),
+        min_stable_frames=int(min_stable_frames),
+        detect_chords=bool(detect_chords),
+        annotate_chords=bool(detect_chords),
+        enable_omr=bool(enable_omr),
+        reference_score_path=(reference_file.name if reference_file else ""),
     )
 
     def _cb(fraction: float, message: str) -> None:
         progress(fraction, desc=message)
 
     try:
-        result = pipeline.run(url.strip(), config, progress=_cb)
+        result = pipeline.run(config, progress=_cb)
     except Exception as exc:  # se muestra como error en la UI
         logger.exception("El pipeline falló")
         raise gr.Error(str(exc)) from exc
 
-    gallery = [str(p) for p in result.page_paths]
+    gallery = [str(p) for p in result.final_images]
     summary = f"✅ {result.num_pages} página(s)"
     if result.title:
         summary += f" · {result.title}"
+    if result.comparisons:
+        total_diff = sum(c.num_differences for c in result.comparisons)
+        summary += f" · {total_diff} diferencia(s) vs. referencia"
     return str(result.pdf_path), gallery, summary
 
 
@@ -63,35 +72,45 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Extractor de Partituras") as demo:
         gr.Markdown(
             "# 🎼 Extractor de Partituras\n"
-            "Pega la URL de un vídeo que muestre una partitura (página a página "
-            "o con scroll) y obtén un **PDF** limpio con las páginas únicas."
+            "Pega la URL de un vídeo que muestre una partitura (página a página) "
+            "y obtén un **PDF** limpio con las páginas únicas, con acordes "
+            "anotados opcionalmente."
         )
 
         with gr.Row():
             url = gr.Textbox(
                 label="URL del vídeo",
+                value=Config().youtube_url,
                 placeholder="https://www.youtube.com/watch?v=…",
                 scale=4,
             )
             btn = gr.Button("Extraer", variant="primary", scale=1)
 
         with gr.Accordion("Opciones avanzadas", open=False):
-            frame_interval = gr.Slider(
-                0.25, 5.0, value=1.0, step=0.25,
-                label="Intervalo de muestreo (s)",
-                info="Cada cuántos segundos se analiza un frame.",
+            fps_sample = gr.Slider(
+                0.5, 5.0, value=2.0, step=0.5,
+                label="Muestreo (frames/segundo)",
+                info="Cuántos frames por segundo se analizan.",
             )
             ssim_threshold = gr.Slider(
-                0.50, 0.99, value=0.92, step=0.01,
+                0.50, 0.99, value=0.88, step=0.01,
                 label="Umbral de similitud (SSIM)",
-                info="Más alto = más sensible a cambios pequeños (más páginas).",
+                info="Más alto = más sensible a cambios (más páginas).",
             )
-            ocr_enabled = gr.Checkbox(
-                value=True, label="Detectar título con OCR"
+            min_stable_frames = gr.Slider(
+                1, 10, value=3, step=1,
+                label="Frames estables antes de capturar",
             )
-            omr_enabled = gr.Checkbox(
+            detect_chords = gr.Checkbox(
+                value=True, label="Detectar y anotar acordes (OCR)"
+            )
+            enable_omr = gr.Checkbox(
                 value=False,
-                label="OMR + deduplicación musical (lento, requiere oemer)",
+                label="OMR: reconocer notas a MusicXML (lento, requiere oemer)",
+            )
+            reference_file = gr.File(
+                label="Partitura de referencia (opcional: MusicXML/MIDI/krn)",
+                file_types=[".musicxml", ".xml", ".mxl", ".mid", ".midi", ".krn"],
             )
 
         status = gr.Textbox(label="Estado", interactive=False)
@@ -102,7 +121,10 @@ def build_ui() -> gr.Blocks:
 
         btn.click(
             fn=process,
-            inputs=[url, frame_interval, ssim_threshold, ocr_enabled, omr_enabled],
+            inputs=[
+                url, fps_sample, ssim_threshold, min_stable_frames,
+                detect_chords, enable_omr, reference_file,
+            ],
             outputs=[pdf_out, gallery, status],
         )
 

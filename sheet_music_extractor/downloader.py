@@ -1,7 +1,8 @@
-"""Descarga de vídeos con yt-dlp.
+"""
+downloader.py — Descarga de vídeos con yt-dlp.
 
 Envuelve la API de Python de ``yt-dlp`` para obtener el archivo de vídeo y sus
-metadatos (título, id, duración), que luego se usan para nombrar la salida.
+metadatos (título, id, duración). Descarga en ``config.base`` (output/).
 """
 from __future__ import annotations
 
@@ -19,6 +20,9 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
+# Se limita a 1080p: la resolución de una partitura rara vez necesita más.
+DEFAULT_VIDEO_FORMAT = "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+
 
 class DownloadError(RuntimeError):
     """Error al descargar un vídeo."""
@@ -35,15 +39,15 @@ class VideoInfo:
 
 
 def download_video(
-    url: str,
     config: Config,
+    url: Optional[str] = None,
     progress_hook: Optional[Callable[[dict], None]] = None,
 ) -> VideoInfo:
-    """Descarga ``url`` a ``config.download_dir`` y devuelve un :class:`VideoInfo`.
+    """Descarga el vídeo a ``config.base`` y devuelve un :class:`VideoInfo`.
 
     Args:
-        url: URL del vídeo (YouTube u otras fuentes soportadas por yt-dlp).
         config: Configuración del pipeline.
+        url: URL a descargar; si es ``None`` se usa ``config.youtube_url``.
         progress_hook: Callback opcional de progreso de yt-dlp.
 
     Raises:
@@ -52,11 +56,12 @@ def download_video(
     if yt_dlp is None:
         raise DownloadError("yt-dlp no está instalado. Ejecuta: pip install yt-dlp")
 
-    config.download_dir.mkdir(parents=True, exist_ok=True)
-    outtmpl = str(config.download_dir / "%(id)s.%(ext)s")
+    url = url or config.youtube_url
+    config.base.mkdir(parents=True, exist_ok=True)
+    outtmpl = str(config.base / "video.%(ext)s")
 
     ydl_opts = {
-        "format": config.video_format,
+        "format": DEFAULT_VIDEO_FORMAT,
         "outtmpl": outtmpl,
         "quiet": True,
         "no_warnings": True,

@@ -1,61 +1,72 @@
-"""Configuración central del extractor de partituras.
-
-Reúne todas las opciones ajustables del pipeline en un único ``dataclass``
-para que cada etapa (descarga, extracción, OCR, OMR, PDF) lea de la misma
-fuente de verdad.
 """
-from __future__ import annotations
-
+config.py — Configuración central del proyecto.
+"""
 from dataclasses import dataclass, field
 from pathlib import Path
-
-# Directorio base del paquete y carpeta de salida por defecto.
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_OUTPUT_DIR = BASE_DIR / "output"
 
 
 @dataclass
 class Config:
-    """Opciones de configuración del pipeline completo."""
-
-    # ── Descarga (yt-dlp) ──
-    # Se limita a 1080p para no descargar vídeos innecesariamente grandes;
-    # la resolución de una partitura escaneada rara vez necesita más.
-    video_format: str = "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-    download_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR / "downloads")
+    # ── Entrada ──
+    youtube_url: str = "https://www.youtube.com/watch?v=wIdVXJlTfQk"
+    output_dir: str = "output"
 
     # ── Extracción de frames ──
-    frame_interval_sec: float = 1.0   # cada cuántos segundos se muestrea un frame
-    ssim_threshold: float = 0.92      # similitud >= umbral => se considera el mismo frame
-    resize_for_compare: tuple[int, int] = (320, 180)  # tamaño reducido para comparar rápido
+    fps_sample: float = 2.0           # Frames por segundo a muestrear
+    ssim_threshold: float = 0.88      # Umbral SSIM: misma página si > threshold
+    min_stable_frames: int = 3        # Frames estables antes de capturar página
 
-    # Recortes relativos (0.0–1.0) aplicados a cada frame antes de procesar.
-    # Útil para eliminar barras superiores/inferiores, marcas de agua, etc.
-    crop_top: float = 0.0
-    crop_bottom: float = 0.0
-    crop_left: float = 0.0
-    crop_right: float = 0.0
+    # ── Detección de pentagrama ──
+    min_staff_lines: int = 5          # Líneas mínimas para detectar pentagrama
+    staff_line_min_width: float = 0.25  # Ancho mínimo (% del frame) para línea
 
-    # ── OCR (pytesseract) ──
-    ocr_enabled: bool = True
-    ocr_lang: str = "spa+eng"
+    # ── OCR ──
+    ocr_languages: str = "eng+spa"
+    detect_chords: bool = True
+    chord_region_offset: int = 50     # px encima del pentagrama para buscar acordes
 
-    # ── OMR (oemer) ──
-    # oemer es muy costoso (modelos de deep learning); desactivado por defecto.
-    omr_enabled: bool = False
-    use_omr_dedup: bool = False       # usar comparación musical para eliminar duplicados
+    # ── OMR ──
+    enable_omr: bool = True           # Activar reconocimiento de notas
+    omr_use_tf: bool = False          # Usar TensorFlow (True) u ONNX (False)
+    omr_without_deskew: bool = True   # Desactivar deskew (imágenes de video son rectas)
 
-    # ── Salida ──
-    output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
-    frames_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR / "frames")
-    pdf_name: str = "partitura.pdf"
-    keep_frames: bool = True          # conservar los PNG de cada página
+    # ── Comparación ──
+    reference_score_path: str = ""    # Ruta a partitura de referencia (MusicXML/MIDI/krn)
+    comparison_details: list = field(default_factory=lambda: [
+        "notesandrests", "beams", "ties", "slurs",
+        "signatures", "directions", "chordsymbols"
+    ])
 
-    def ensure_dirs(self) -> None:
-        """Crea los directorios de trabajo si no existen."""
-        for directory in (self.download_dir, self.output_dir, self.frames_dir):
-            directory.mkdir(parents=True, exist_ok=True)
+    # ── PDF ──
+    pdf_dpi: int = 300
+    annotate_chords: bool = True      # Dibujar acordes OCR sobre la imagen
+
+    # ── Rutas derivadas ──
+    @property
+    def base(self) -> Path:
+        return Path(self.output_dir)
 
     @property
-    def pdf_path(self) -> Path:
-        return self.output_dir / self.pdf_name
+    def frames_dir(self) -> Path:
+        return self.base / "frames"
+
+    @property
+    def pages_dir(self) -> Path:
+        return self.base / "pages"
+
+    @property
+    def annotated_dir(self) -> Path:
+        return self.base / "annotated"
+
+    @property
+    def omr_dir(self) -> Path:
+        return self.base / "omr"
+
+    @property
+    def comparison_dir(self) -> Path:
+        return self.base / "comparison"
+
+    def ensure_dirs(self):
+        for d in [self.frames_dir, self.pages_dir, self.annotated_dir,
+                  self.omr_dir, self.comparison_dir]:
+            d.mkdir(parents=True, exist_ok=True)

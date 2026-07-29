@@ -1,25 +1,44 @@
-"""Comparación de partituras para detectar duplicados musicales.
+"""
+comparator.py — Comparación de la partitura reconocida con una de referencia.
 
-Cuando OMR está activo, dos frames visualmente distintos (distinto zoom,
-resaltado del compás actual, etc.) pueden corresponder a la misma música.
-Comparando su MusicXML con ``musicdiff`` podemos detectar y descartar esos
-duplicados. La función es best-effort: si las dependencias no están o la
-comparación falla, devuelve ``None`` y el pipeline usa sólo el dedupe visual.
+Si se indica ``config.reference_score_path``, se compara cada página
+reconocida por OMR (MusicXML) contra la partitura de referencia usando
+``musicdiff``, generando las visualizaciones de diferencias en
+``comparison_dir``. Es best-effort: si ``musicdiff`` no está instalado o falla,
+devuelve ``None``.
 """
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Union
+
+from config import Config
 
 logger = logging.getLogger(__name__)
 
 
-def musical_difference(a: Union[str, Path], b: Union[str, Path]) -> Optional[int]:
+@dataclass
+class PageComparison:
+    """Resultado de comparar una página con la referencia."""
+
+    page_index: int
+    num_differences: int
+    visual_a: Optional[Path] = None
+    visual_b: Optional[Path] = None
+
+
+def musical_difference(
+    a: Union[str, Path],
+    b: Union[str, Path],
+    out_a: Optional[Path] = None,
+    out_b: Optional[Path] = None,
+) -> Optional[int]:
     """Número de diferencias musicales entre dos MusicXML (0 = idénticas).
 
-    Devuelve ``None`` si ``musicdiff`` no está disponible o la comparación
-    no se puede realizar.
+    Devuelve ``None`` si ``musicdiff`` no está disponible o la comparación falla.
+    Si se dan ``out_a``/``out_b``, genera las visualizaciones marcadas.
     """
     try:
         from musicdiff import diff
@@ -28,51 +47,57 @@ def musical_difference(a: Union[str, Path], b: Union[str, Path]) -> Optional[int
         return None
 
     try:
-        # diff() devuelve el número de diferencias detectadas. Se le pide que
-        # no genere las visualizaciones PDF (out_path*=None).
-        num = diff(str(a), str(b), out_path1=None, out_path2=None)
+        num = diff(
+            str(a),
+            str(b),
+            out_path1=str(out_a) if out_a else None,
+            out_path2=str(out_b) if out_b else None,
+        )
         return int(num) if num is not None else None
     except Exception as exc:
         logger.warning("Comparación musical falló entre %s y %s: %s", a, b, exc)
         return None
 
 
-def deduplicate_by_music(
-    page_paths: List[Path],
-    xml_paths: List[Optional[Path]],
-    max_diff: int = 0,
-) -> List[Path]:
-    """Elimina páginas cuya música coincida con una página anterior.
+def compare_to_reference(
+    omr_xmls: List[Optional[Path]],
+    config: Config,
+) -> Optional[List[PageComparison]]:
+    """Compara cada MusicXML reconocido con la partitura de referencia.
 
-    Args:
-        page_paths: rutas de las imágenes de cada página.
-        xml_paths: MusicXML correspondiente a cada página (o ``None``).
-        max_diff: máximo número de diferencias para considerar duplicado.
-
-    Returns:
-        La lista de imágenes conservadas, preservando el orden.
+    Devuelve la lista de :class:`PageComparison`, o ``None`` si no hay
+    referencia configurada o no existe el archivo.
     """
-    kept_pages: List[Path] = []
-    kept_xml: List[Path] = []
+    ref = config.reference_score_path
+    if not ref:
+        return None
+    ref_path = Path(ref)
+    if not ref_path.exists():
+        logger.warning("Partitura de referencia no encontrada: %s", ref_path)
+        return None
 
-    for page, xml in zip(page_paths, xml_paths):
+    config.comparison_dir.mkdir(parents=True, exist_ok=True)
+    # ``comparison_details`` describe qué elementos comparar; se registra para
+    # trazabilidad (musicdiff aplica su nivel de detalle por defecto).
+    logger.info("Detalles de comparación solicitados: %s", config.comparison_details)
+
+    results: List[PageComparison] = []
+    for i, xml in enumerate(omr_xmls, start=1):
         if xml is None:
-            # Sin partitura reconocida no podemos comparar: conservar.
-            kept_pages.append(page)
             continue
+        out_a = config.comparison_dir / f"ref_vs_page{i:03d}_ref.pdf"
+        out_b = config.comparison_dir / f"ref_vs_page{i:03d}_page.pdf"
+        num = musical_difference(ref_path, xml, out_a=out_a, out_b=out_b)
+        if num is None:
+            continue
+        results.append(
+            PageComparison(
+                page_index=i,
+                num_differences=num,
+                visual_a=out_a if out_a.exists() else None,
+                visual_b=out_b if out_b.exists() else None,
+            )
+        )
 
-        is_duplicate = False
-        for ref_xml in kept_xml:
-            diff = musical_difference(xml, ref_xml)
-            if diff is not None and diff <= max_diff:
-                is_duplicate = True
-                break
-
-        if not is_duplicate:
-            kept_pages.append(page)
-            kept_xml.append(xml)
-
-    logger.info(
-        "Dedupe musical: %d -> %d páginas", len(page_paths), len(kept_pages)
-    )
-    return kept_pages
+    logger.info("Comparación con referencia: %d páginas comparadas", len(results))
+    return results
