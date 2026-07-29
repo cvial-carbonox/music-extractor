@@ -44,9 +44,24 @@ pip install -r requirements.txt
 
 ### Dependencias del sistema
 
-- **Tesseract OCR** (para `pytesseract`), sólo si quieres detección de título:
-  - Debian/Ubuntu: `sudo apt install tesseract-ocr tesseract-ocr-spa`
-  - macOS: `brew install tesseract tesseract-lang`
+**Tesseract OCR** (para `pytesseract`), sólo si quieres detección de título.
+Instala también los paquetes de idioma que uses (`spa`, `eng`):
+
+```bash
+# Ubuntu/Debian:
+sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-spa
+
+# macOS:
+brew install tesseract
+
+# Windows: https://github.com/UB-Mannheim/tesseract/wiki
+```
+
+> En Windows, si el binario no queda en el `PATH`, indícalo en tu código con
+> `pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"`.
+
+Otras dependencias del sistema:
+
 - **FFmpeg** (recomendado por `yt-dlp` para fusionar audio y vídeo).
 - `oemer` descarga sus modelos la primera vez que se ejecuta (OMR es opcional
   y computacionalmente costoso).
