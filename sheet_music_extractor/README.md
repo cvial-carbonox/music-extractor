@@ -15,9 +15,8 @@ El pipeline consta de las siguientes etapas:
 | --- | --- |
 | `downloader.py` | Descarga el vídeo con `yt-dlp` y obtiene sus metadatos. |
 | `frame_extractor.py` | `FrameExtractor`: extrae frames, detecta pentagramas y filtra páginas únicas (SSIM). Produce `PageResult`. |
-| `staff_detector.py` | Detección de líneas de pentagrama usada por el OCR para ubicar la banda de acordes. |
-| `ocr_engine.py` | Reconoce el título y los símbolos de acorde con Tesseract. |
-| `annotator.py` | Dibuja los acordes detectados sobre cada página. |
+| `ocr_engine.py` | `OCREngine`: título, acordes, indicaciones de tempo/dinámica y texto (Tesseract). |
+| `annotator.py` | Rotula los acordes detectados como cabecera sobre cada página. |
 | `omr_engine.py` | (Opcional) Convierte cada página a MusicXML con `oemer`. |
 | `comparator.py` | (Opcional) Compara la partitura reconocida con una de referencia (`musicdiff`). |
 | `pdf_generator.py` | Combina las páginas en un PDF a `pdf_dpi` con `img2pdf`. |
@@ -140,7 +139,6 @@ sheet_music_extractor/
 ├── config.py
 ├── downloader.py
 ├── frame_extractor.py
-├── staff_detector.py
 ├── ocr_engine.py
 ├── annotator.py
 ├── omr_engine.py

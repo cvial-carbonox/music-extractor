@@ -1,8 +1,10 @@
 """
 annotator.py — Dibuja los acordes detectados sobre la imagen de la página.
 
-Toma la lista de :class:`ocr_engine.Chord` y escribe cada símbolo en su
-posición sobre una copia de la página, guardándola en ``annotated_dir``.
+``OCREngine`` produce una lista de acordes a nivel de página (cadenas ya
+deduplicadas, sin coordenadas individuales). Por tanto se rotulan como una
+banda-cabecera en la parte superior de la página, en lugar de sobre cada
+posición concreta.
 """
 from __future__ import annotations
 
@@ -13,11 +15,11 @@ from typing import List, Union
 from PIL import Image, ImageDraw, ImageFont
 
 from config import Config
-from ocr_engine import Chord
 
 logger = logging.getLogger(__name__)
 
-_CHORD_COLOR = (200, 30, 30)  # rojo para que resalte sobre el pentagrama negro
+_CHORD_COLOR = (200, 30, 30)      # rojo, resalta sobre el pentagrama negro
+_BANNER_BG = (255, 255, 210)      # fondo crema para legibilidad
 
 
 def _load_font(size: int) -> ImageFont.ImageFont:
@@ -32,13 +34,13 @@ def _load_font(size: int) -> ImageFont.ImageFont:
 
 def annotate_page(
     page_path: Union[str, Path],
-    chords: List[Chord],
+    chords: List[str],
     out_path: Union[str, Path],
     config: Config,
 ) -> Path:
-    """Dibuja ``chords`` sobre la imagen ``page_path`` y la guarda en ``out_path``.
+    """Rotula ``chords`` sobre la imagen ``page_path`` y la guarda en ``out_path``.
 
-    Si no hay acordes, copia la imagen tal cual para mantener la numeración.
+    Si no hay acordes, guarda la imagen tal cual para mantener la numeración.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -47,9 +49,17 @@ def annotate_page(
         page = img.convert("RGB")
         if chords:
             draw = ImageDraw.Draw(page)
-            font = _load_font(size=max(int(config.chord_region_offset * 0.6), 14))
-            for chord in chords:
-                draw.text((chord.x, chord.y), chord.text, fill=_CHORD_COLOR, font=font)
+            font = _load_font(size=max(int(page.height * 0.025), 16))
+            label = "Acordes: " + "  ".join(chords)
+
+            # Caja de fondo para que el texto sea legible sobre la partitura.
+            left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
+            pad = 8
+            draw.rectangle(
+                [0, 0, min(right - left + 2 * pad, page.width), bottom - top + 2 * pad],
+                fill=_BANNER_BG,
+            )
+            draw.text((pad, pad), label, fill=_CHORD_COLOR, font=font)
         page.save(out_path)
 
     return out_path

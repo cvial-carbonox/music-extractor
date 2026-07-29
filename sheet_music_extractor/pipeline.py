@@ -11,6 +11,7 @@ va rellenando sus campos (``chords_found``, ``omr_musicxml``…).
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,16 +20,32 @@ from typing import Callable, List, Optional
 import annotator
 import comparator
 import downloader
-import ocr_engine
 import omr_engine
 import pdf_generator
 from comparator import PageComparison
 from config import Config
 from frame_extractor import FrameExtractor, PageResult
+from ocr_engine import OCREngine
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Optional[Callable[[float, str], None]]
+
+
+def _sanitize(text: str) -> str:
+    """Limpia una cadena para usarla como nombre de archivo."""
+    text = re.sub(r"[^\w\s\-]", "", text, flags=re.UNICODE)
+    text = re.sub(r"\s+", "_", text.strip())
+    return text[:80]
+
+
+def _title_from_text(text: str) -> str:
+    """Extrae un título del bloque de texto OCR de la primera página."""
+    match = re.search(r"\[Título/Encabezado\]\s*(.+)", text)
+    if not match:
+        return ""
+    first_line = match.group(1).splitlines()[0].strip()
+    return _sanitize(first_line)
 
 
 @dataclass
@@ -86,24 +103,22 @@ def run(
         dest = config.pages_dir / f"page_{page.page_number:03d}.png"
         shutil.copyfile(page.frame_path, dest)
 
-    # 3. OCR del título -----------------------------------------------------
-    title = ocr_engine.guess_title(pages[0].frame_path, config)
-
-    # 4. Acordes (OCR) + anotación -----------------------------------------
+    # 3-4. OCR (título, acordes, indicaciones, texto) + anotación ----------
+    _report(progress, 0.55, "OCR de páginas…")
+    ocr = OCREngine(config)
+    title = ""
     final_images: List[Path] = []
-    for page in pages:
+    for i, page in enumerate(pages, start=1):
+        _report(progress, 0.55 + 0.10 * (i / len(pages)), f"OCR página {i}/{len(pages)}…")
         page_img = config.pages_dir / f"page_{page.page_number:03d}.png"
 
-        if config.detect_chords:
-            page.chords_found = ocr_engine.detect_chords(page_img, config)
-            if page.chords_found:
-                logger.info(
-                    "Página %d: %d acordes detectados",
-                    page.page_number, len(page.chords_found),
-                )
+        ocr.process_page(page)  # rellena page.chords_found y page.text_found
+        if page.page_number == 1:
+            title = _title_from_text(page.text_found)
+        if page.chords_found:
+            logger.info("Página %d: %d acordes", page.page_number, len(page.chords_found))
 
         if config.detect_chords and config.annotate_chords:
-            _report(progress, 0.60, "Anotando acordes…")
             out = config.annotated_dir / f"page_{page.page_number:03d}.png"
             annotator.annotate_page(page_img, page.chords_found, out, config)
             final_images.append(out)
@@ -135,7 +150,7 @@ def run(
 
     # 7. Generación del PDF -------------------------------------------------
     _report(progress, 0.92, "Generando PDF…")
-    pdf_name = f"{ocr_engine._sanitize(title)}.pdf" if title else "partitura.pdf"
+    pdf_name = f"{title}.pdf" if title else "partitura.pdf"
     pdf_path = config.base / pdf_name
     pdf_generator.images_to_pdf(final_images, pdf_path, dpi=config.pdf_dpi)
 
