@@ -19,7 +19,7 @@ El pipeline consta de las siguientes etapas:
 | `omr_engine.py` | (Opcional) `OMREngine`: página→MusicXML/MIDI con `oemer`, fusiona páginas y resume notas (`music21`). |
 | `comparator.py` | (Opcional) `ScoreComparator`: diff visual/textual/OMR-NED (`musicdiff`) + precisión de notas/ritmo y similitud (`music21`). |
 | `pdf_generator.py` | `PDFGenerator`: recorta bordes, mejora la imagen, anota acordes, genera el PDF (`img2pdf`) y un reporte OCR. |
-| `pipeline.py` | Orquesta todas las etapas. |
+| `pipeline.py` | `Pipeline.run_full()`: orquesta todas las etapas y devuelve un dict de resultados. |
 | `app.py` | Interfaz web con Gradio (punto de entrada). |
 | `config.py` | Configuración central del pipeline. |
 
@@ -90,7 +90,7 @@ páginas detectadas.
 
 ```python
 from config import Config
-import pipeline
+from pipeline import Pipeline
 
 config = Config(
     youtube_url="https://www.youtube.com/watch?v=XXXX",
@@ -100,9 +100,9 @@ config = Config(
     enable_omr=False,               # activa oemer si quieres MusicXML
     reference_score_path="",        # opcional: comparar con una partitura
 )
-result = pipeline.run(config)
+results = Pipeline(config).run_full()
 
-print(result.num_pages, "páginas en", result.pdf_path)
+print(results.get("pages"), "páginas en", results.get("pdf"))
 ```
 
 ## Ajuste de parámetros

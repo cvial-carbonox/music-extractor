@@ -14,8 +14,8 @@ import logging
 
 import gradio as gr
 
-import pipeline
 from config import Config
+from pipeline import Pipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,25 +49,32 @@ def process(
         reference_score_path=(reference_file.name if reference_file else ""),
     )
 
-    def _cb(fraction: float, message: str) -> None:
-        progress(fraction, desc=message)
+    def _cb(step: str, pct: float) -> None:
+        # El pipeline reporta (paso, porcentaje 0-100); Gradio espera 0-1.
+        progress(min(pct / 100.0, 1.0), desc=step)
 
+    pipe = Pipeline(config)
     try:
-        result = pipeline.run(config, progress=_cb)
+        results = pipe.run_full(progress_callback=_cb)
     except Exception as exc:  # se muestra como error en la UI
         logger.exception("El pipeline falló")
         raise gr.Error(str(exc)) from exc
 
-    gallery = [str(p) for p in result.final_images]
-    summary = f"✅ {result.num_pages} página(s)"
-    if result.title:
-        summary += f" · {result.title}"
-    if result.comparison:
-        note_cmp = result.comparison.get("note_comparison", {})
-        sim = note_cmp.get("sequence_similarity")
-        if sim is not None:
-            summary += f" · similitud {sim:.0%} vs. referencia"
-    return str(result.pdf_path), gallery, summary
+    if results.get("error"):
+        raise gr.Error(results["error"])
+
+    # Galería: las imágenes anotadas de cada página (annotated_dir).
+    gallery = [
+        str(config.annotated_dir / f"page_{page.page_number:03d}.png")
+        for page in pipe.pages
+    ]
+
+    summary = f"✅ {results.get('pages', 0)} página(s) · {results.get('total_chords', 0)} acordes"
+    comparison = results.get("comparison") or {}
+    sim = comparison.get("note_comparison", {}).get("sequence_similarity")
+    if sim is not None:
+        summary += f" · similitud {sim:.0%} vs. referencia"
+    return results.get("pdf", ""), gallery, summary
 
 
 def build_ui() -> gr.Blocks:
