@@ -7,6 +7,35 @@ Pensado para vídeos que muestran una partitura **página a página** o con
 **scroll** mientras suena la música. El sistema detecta los frames que
 representan páginas distintas, elimina duplicados y ensambla el resultado.
 
+## 🚀 Inicio rápido
+
+```bash
+# 1. Instalar dependencias
+pip install -r requirements.txt
+sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-spa  # Linux
+
+# 2. Lanzar interfaz web
+python app.py
+# → Abre http://localhost:7860
+
+# 3. O usar desde terminal (sin UI):
+python -c "
+from config import Config
+from pipeline import Pipeline
+
+cfg = Config(
+    youtube_url='https://www.youtube.com/watch?v=wIdVXJlTfQk',
+    enable_omr=True,
+    reference_score_path='mi_referencia.musicxml',  # opcional
+)
+Pipeline(cfg).run_full()
+"
+```
+
+> `oemer` (OMR) descarga sus modelos la primera vez; para OCR también hace
+> falta el binario de **Tesseract** y, para `yt-dlp`, **FFmpeg**. Ver
+> [Instalación](#instalación) para más detalle.
+
 ## ¿Cómo funciona?
 
 El pipeline consta de las siguientes etapas:
