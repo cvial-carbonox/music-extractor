@@ -1,144 +1,280 @@
 """
-app.py — Interfaz web con Gradio (punto de entrada).
+app.py — Interfaz web con Gradio.
+Punto de entrada principal de la aplicación.
 
-Ejecuta::
-
-    python app.py
-
-y abre el navegador para pegar la URL de un vídeo y obtener el PDF con la
-partitura extraída.
+Uso:  python app.py
+Abre: http://localhost:7860
 """
-from __future__ import annotations
-
-import logging
-
+import os
+import json
 import gradio as gr
-
+from pathlib import Path
 from config import Config
 from pipeline import Pipeline
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-logger = logging.getLogger(__name__)
+from downloader import get_video_info
 
 
-def process(
-    url: str,
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# FUNCIÓN PRINCIPAL (llamada por Gradio)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def process_video(
+    youtube_url: str,
     fps_sample: float,
     ssim_threshold: float,
-    min_stable_frames: int,
-    detect_chords: bool,
     enable_omr: bool,
     reference_file,
-    progress: gr.Progress = gr.Progress(),
-):
-    """Callback del botón: ejecuta el pipeline y devuelve PDF + galería."""
-    if not url or not url.strip():
-        raise gr.Error("Introduce una URL de vídeo válida.")
+    progress=gr.Progress(track_tqdm=True),
+) -> tuple:
+    """
+    Procesa un video de YouTube y retorna todos los resultados.
+    """
+    if not youtube_url.strip():
+        return "❌ Ingresa una URL de YouTube", None, None, None, None, None
 
-    config = Config(
-        youtube_url=url.strip(),
-        fps_sample=float(fps_sample),
-        ssim_threshold=float(ssim_threshold),
-        min_stable_frames=int(min_stable_frames),
-        detect_chords=bool(detect_chords),
-        annotate_chords=bool(detect_chords),
-        enable_omr=bool(enable_omr),
-        reference_score_path=(reference_file.name if reference_file else ""),
+    # Crear configuración
+    cfg = Config(
+        youtube_url=youtube_url.strip(),
+        output_dir=f"output_{hash(youtube_url) % 10000:04d}",
+        fps_sample=fps_sample,
+        ssim_threshold=ssim_threshold,
+        enable_omr=enable_omr,
     )
 
-    def _cb(step: str, pct: float) -> None:
-        # El pipeline reporta (paso, porcentaje 0-100); Gradio espera 0-1.
-        progress(min(pct / 100.0, 1.0), desc=step)
+    # Partitura de referencia (si se subió)
+    if reference_file is not None:
+        cfg.reference_score_path = reference_file.name
 
-    pipe = Pipeline(config)
+    # Ejecutar pipeline
+    pipeline = Pipeline(cfg)
+
     try:
-        results = pipe.run_full(progress_callback=_cb)
-    except Exception as exc:  # se muestra como error en la UI
-        logger.exception("El pipeline falló")
-        raise gr.Error(str(exc)) from exc
+        results = pipeline.run_full(
+            progress_callback=lambda step, pct: progress(pct / 100, desc=step)
+        )
+    except Exception as e:
+        return f"❌ Error: {str(e)}", None, None, None, None, None
 
-    if results.get("error"):
-        raise gr.Error(results["error"])
+    if 'error' in results:
+        return f"❌ {results['error']}", None, None, None, None, None
 
-    # Galería: las imágenes anotadas de cada página (annotated_dir).
-    gallery = [
-        str(config.annotated_dir / f"page_{page.page_number:03d}.png")
-        for page in pipe.pages
+    # ── Construir resumen ──
+    summary_lines = [
+        f"## ✅ Procesamiento Completado\n",
+        f"| Métrica | Valor |",
+        f"|---------|-------|",
+        f"| Páginas detectadas | {results.get('pages', 0)} |",
+        f"| Acordes OCR | {results.get('total_chords', 0)} |",
     ]
 
-    summary = f"✅ {results.get('pages', 0)} página(s) · {results.get('total_chords', 0)} acordes"
-    comparison = results.get("comparison") or {}
-    sim = comparison.get("note_comparison", {}).get("sequence_similarity")
-    if sim is not None:
-        summary += f" · similitud {sim:.0%} vs. referencia"
-    return results.get("pdf", ""), gallery, summary
+    if results.get('note_summary'):
+        ns = results['note_summary']
+        summary_lines.append(f"| Notas OMR | {ns.get('total_notes', 'N/A')} |")
+        summary_lines.append(f"| Rango | {ns.get('pitch_range', 'N/A')} |")
+
+    if results.get('comparison'):
+        nc = results['comparison'].get('note_comparison', {})
+        if nc and 'pitch_accuracy' in nc:
+            summary_lines.append(f"| Precisión pitch | {nc['pitch_accuracy']:.1%} |")
+            summary_lines.append(f"| Precisión ritmo | {nc['rhythm_accuracy']:.1%} |")
+            summary_lines.append(f"| Similitud | {nc['sequence_similarity']:.1%} |")
+
+    summary = "\n".join(summary_lines)
+
+    # ── Archivos de salida ──
+    pdf_file = results.get('pdf')
+    ocr_file = results.get('ocr_report')
+    musicxml_file = results.get('merged_musicxml')
+
+    # Imágenes de páginas anotadas
+    annotated_dir = cfg.annotated_dir
+    gallery_images = sorted(annotated_dir.glob("page_*.png"))
+    gallery = [str(p) for p in gallery_images]
+
+    # Diff visual
+    diff_pdf = None
+    if results.get('comparison', {}).get('visual_pdf'):
+        diff_pdf = results['comparison']['visual_pdf']
+
+    return summary, pdf_file, ocr_file, musicxml_file, diff_pdf, gallery
 
 
-def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="Extractor de Partituras") as demo:
+def get_video_preview(url: str) -> str:
+    """Obtiene info del video para preview."""
+    if not url.strip():
+        return ""
+    try:
+        info = get_video_info(url.strip())
+        dur = info['duration']
+        return (
+            f"🎵 **{info['title']}**\n\n"
+            f"- Canal: {info['uploader']}\n"
+            f"- Duración: {dur // 60}:{dur % 60:02d}\n"
+            f"- Thumbnail: {info['thumbnail'][:80]}..."
+        )
+    except Exception as e:
+        return f"⚠️ No se pudo obtener info: {e}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# INTERFAZ GRADIO
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def build_ui():
+    """Construye la interfaz web."""
+
+    with gr.Blocks(
+        title="🎼 Extractor de Partituras",
+        theme=gr.themes.Soft(
+            primary_hue="indigo",
+            secondary_hue="amber",
+        ),
+        css="""
+        .main-header { text-align: center; margin-bottom: 10px; }
+        .output-box { border: 2px solid #e0e0e0; border-radius: 8px; padding: 15px; }
+        """
+    ) as app:
+
+        # ── Header ──
         gr.Markdown(
-            "# 🎼 Extractor de Partituras\n"
-            "Pega la URL de un vídeo que muestre una partitura (página a página) "
-            "y obtén un **PDF** limpio con las páginas únicas, con acordes "
-            "anotados opcionalmente."
+            """
+            # 🎼 Extractor de Partituras de YouTube
+            ### Video → Pentagrama → OCR + OMR → PDF + MusicXML + MIDI
+            """,
+            elem_classes="main-header",
         )
 
         with gr.Row():
-            url = gr.Textbox(
-                label="URL del vídeo",
-                value=Config().youtube_url,
-                placeholder="https://www.youtube.com/watch?v=…",
-                scale=4,
-            )
-            btn = gr.Button("Extraer", variant="primary", scale=1)
+            # ── Columna izquierda: Entradas ──
+            with gr.Column(scale=1):
+                gr.Markdown("### 📥 Entrada")
 
-        with gr.Accordion("Opciones avanzadas", open=False):
-            fps_sample = gr.Slider(
-                0.5, 5.0, value=2.0, step=0.5,
-                label="Muestreo (frames/segundo)",
-                info="Cuántos frames por segundo se analizan.",
-            )
-            ssim_threshold = gr.Slider(
-                0.50, 0.99, value=0.88, step=0.01,
-                label="Umbral de similitud (SSIM)",
-                info="Más alto = más sensible a cambios (más páginas).",
-            )
-            min_stable_frames = gr.Slider(
-                1, 10, value=3, step=1,
-                label="Frames estables antes de capturar",
-            )
-            detect_chords = gr.Checkbox(
-                value=True, label="Detectar y anotar acordes (OCR)"
-            )
-            enable_omr = gr.Checkbox(
-                value=False,
-                label="OMR: reconocer notas a MusicXML (lento, requiere oemer)",
-            )
-            reference_file = gr.File(
-                label="Partitura de referencia (opcional: MusicXML/MIDI/krn)",
-                file_types=[".musicxml", ".xml", ".mxl", ".mid", ".midi", ".krn"],
-            )
+                url_input = gr.Textbox(
+                    label="URL de YouTube",
+                    placeholder="https://www.youtube.com/watch?v=...",
+                    value="https://www.youtube.com/watch?v=wIdVXJlTfQk",
+                    lines=2,
+                )
 
-        status = gr.Textbox(label="Estado", interactive=False)
-        pdf_out = gr.File(label="PDF resultante")
-        gallery = gr.Gallery(
-            label="Páginas detectadas", columns=3, height=420, object_fit="contain"
+                video_preview = gr.Markdown("")
+
+                url_input.change(
+                    fn=get_video_preview,
+                    inputs=url_input,
+                    outputs=video_preview,
+                )
+
+                gr.Markdown("### ⚙️ Configuración")
+
+                fps_slider = gr.Slider(
+                    minimum=0.5, maximum=5.0, value=2.0, step=0.5,
+                    label="Frames por segundo (muestreo)",
+                    info="Más alto = más preciso pero más lento",
+                )
+
+                ssim_slider = gr.Slider(
+                    minimum=0.75, maximum=0.98, value=0.88, step=0.01,
+                    label="Umbral SSIM (similitud de página)",
+                    info="Menor = más sensible a cambios",
+                )
+
+                omr_checkbox = gr.Checkbox(
+                    value=True,
+                    label="Activar OMR (reconocimiento de notas con oemer)",
+                    info="Requiere oemer instalado. Genera MusicXML y MIDI.",
+                )
+
+                gr.Markdown("### 📎 Partitura de Referencia (opcional)")
+
+                reference_input = gr.File(
+                    label="Subir partitura de referencia",
+                    file_types=[".musicxml", ".xml", ".mid", ".midi", ".krn", ".mei"],
+                    type="filepath",
+                )
+
+                gr.Markdown(
+                    "*Formatos: MusicXML, MIDI, Kern (.krn), MEI*\n"
+                    "*Se usa para comparar y evaluar la precisión del OMR.*"
+                )
+
+                run_button = gr.Button(
+                    "🚀 Extraer Partitura",
+                    variant="primary",
+                    size="lg",
+                )
+
+            # ── Columna derecha: Resultados ──
+            with gr.Column(scale=2):
+                gr.Markdown("### 📊 Resultados")
+
+                summary_output = gr.Markdown(
+                    value="*Los resultados aparecerán aquí...*",
+                    elem_classes="output-box",
+                )
+
+                with gr.Tabs():
+                    with gr.Tab("📄 PDF"):
+                        pdf_output = gr.File(
+                            label="Partitura PDF",
+                            file_types=[".pdf"],
+                        )
+
+                    with gr.Tab("🖼️ Páginas"):
+                        gallery_output = gr.Gallery(
+                            label="Páginas detectadas",
+                            columns=3,
+                            height="auto",
+                        )
+
+                    with gr.Tab("🎼 MusicXML / MIDI"):
+                        musicxml_output = gr.File(
+                            label="MusicXML (OMR)",
+                            file_types=[".musicxml", ".xml"],
+                        )
+
+                    with gr.Tab("📝 OCR"):
+                        ocr_output = gr.File(
+                            label="Reporte OCR",
+                            file_types=[".txt"],
+                        )
+
+                    with gr.Tab("🔍 Comparación"):
+                        diff_output = gr.File(
+                            label="Diff Visual (PDF)",
+                            file_types=[".pdf"],
+                        )
+
+        # ── Footer ──
+        gr.Markdown(
+            """
+            ---
+            **Pipeline:** yt-dlp → OpenCV → SSIM → Tesseract OCR → oemer OMR → music21 → musicdiff → img2pdf
+            """
         )
 
-        btn.click(
-            fn=process,
-            inputs=[
-                url, fps_sample, ssim_threshold, min_stable_frames,
-                detect_chords, enable_omr, reference_file,
+        # ── Conexión del botón ──
+        run_button.click(
+            fn=process_video,
+            inputs=[url_input, fps_slider, ssim_slider, omr_checkbox, reference_input],
+            outputs=[
+                summary_output,
+                pdf_output,
+                ocr_output,
+                musicxml_output,
+                diff_output,
+                gallery_output,
             ],
-            outputs=[pdf_out, gallery, status],
         )
 
-    return demo
+    return app
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# EJECUCIÓN
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if __name__ == "__main__":
-    build_ui().launch()
+    app = build_ui()
+    app.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False,       # True para link público temporal
+        inbrowser=True,    # Abrir navegador automáticamente
+    )
