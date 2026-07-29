@@ -19,6 +19,7 @@ class PageResult:
     timestamp_sec: float
     staff_regions: list = field(default_factory=list)
     chords_found: list = field(default_factory=list)
+    chord_boxes: list = field(default_factory=list)  # ChordHit(text, x, y) para anotar por posición
     text_found: str = ""
     omr_musicxml: str = ""
     omr_midi: str = ""

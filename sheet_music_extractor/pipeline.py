@@ -20,12 +20,12 @@ from typing import Callable, List, Optional
 import annotator
 import comparator
 import downloader
-import omr_engine
 import pdf_generator
 from comparator import PageComparison
 from config import Config
 from frame_extractor import FrameExtractor, PageResult
 from ocr_engine import OCREngine
+from omr_engine import OMREngine
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,9 @@ class PipelineResult:
     title: str = ""
     num_pages: int = 0
     musicxml_paths: List[Path] = field(default_factory=list)
+    merged_musicxml: str = ""
+    merged_midi: str = ""
+    note_summary: dict = field(default_factory=dict)
     comparisons: Optional[List[PageComparison]] = None
 
 
@@ -120,32 +123,46 @@ def run(
 
         if config.detect_chords and config.annotate_chords:
             out = config.annotated_dir / f"page_{page.page_number:03d}.png"
-            annotator.annotate_page(page_img, page.chords_found, out, config)
+            annotator.annotate_page(page_img, page, out, config)
             final_images.append(out)
         else:
             final_images.append(page_img)
 
-    # 5. OMR ----------------------------------------------------------------
+    # 5. OMR (notas → MusicXML/MIDI) + fusión -------------------------------
     musicxml_paths: List[Path] = []
+    merged_musicxml = ""
+    merged_midi = ""
+    note_summary: dict = {}
     if config.enable_omr:
         _report(progress, 0.70, "Reconociendo notas (OMR)…")
+        omr = OMREngine(config)  # puede desactivar enable_omr si falta oemer
         for i, page in enumerate(pages, start=1):
             _report(
                 progress,
-                0.70 + 0.15 * (i / len(pages)),
+                0.70 + 0.12 * (i / len(pages)),
                 f"OMR página {i}/{len(pages)}…",
             )
-            page_img = config.pages_dir / f"page_{page.page_number:03d}.png"
-            xml = omr_engine.image_to_musicxml(page_img, config.omr_dir, config)
-            if xml is not None:
-                page.omr_musicxml = str(xml)
-                musicxml_paths.append(xml)
+            omr.process_page(page)
+            if page.omr_musicxml:
+                musicxml_paths.append(Path(page.omr_musicxml))
 
-    # 6. Comparación con referencia ----------------------------------------
+        merged_musicxml = omr.merge_musicxml(pages)
+        if merged_musicxml:
+            note_summary = omr.extract_note_summary(merged_musicxml)
+            midi = merged_musicxml.replace(".musicxml", ".mid")
+            if Path(midi).exists():
+                merged_midi = midi
+
+    # 6. Comparación con la partitura de referencia ------------------------
     comparisons: Optional[List[PageComparison]] = None
     if config.reference_score_path:
         _report(progress, 0.87, "Comparando con partitura de referencia…")
-        omr_xmls = [Path(p.omr_musicxml) if p.omr_musicxml else None for p in pages]
+        # Comparar la partitura fusionada (más significativa) o, en su defecto,
+        # las páginas reconocidas individualmente.
+        if merged_musicxml:
+            omr_xmls: List[Optional[Path]] = [Path(merged_musicxml)]
+        else:
+            omr_xmls = [Path(p.omr_musicxml) if p.omr_musicxml else None for p in pages]
         comparisons = comparator.compare_to_reference(omr_xmls, config)
 
     # 7. Generación del PDF -------------------------------------------------
@@ -162,5 +179,8 @@ def run(
         title=title,
         num_pages=len(pages),
         musicxml_paths=musicxml_paths,
+        merged_musicxml=merged_musicxml,
+        merged_midi=merged_midi,
+        note_summary=note_summary,
         comparisons=comparisons,
     )

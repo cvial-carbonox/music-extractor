@@ -3,12 +3,21 @@ ocr_engine.py — OCR con Tesseract para extraer acordes, título,
 indicaciones de tempo/dinámica y texto general.
 """
 import re
+from dataclasses import dataclass
 import cv2
 import numpy as np
 import pytesseract
 from PIL import Image
 from config import Config
 from frame_extractor import PageResult
+
+
+@dataclass
+class ChordHit:
+    """Un acorde detectado con su posición (en px, resolución completa)."""
+    text: str
+    x: int
+    y: int
 
 
 # Patrón regex para acordes: Am, G7, Cmaj7, Dm7, Bb, F#dim, Eb/G, etc.
@@ -51,10 +60,10 @@ class OCREngine:
         top_region = gray[0:int(h * 0.12), :]
         top_text = self._ocr_clean(top_region, psm=6)
 
-        # ── 2. Acordes (encima de cada pentagrama) ──
-        chords = []
+        # ── 2. Acordes (encima de cada pentagrama), con posición ──
+        chord_hits = []
         if self.cfg.detect_chords:
-            chords = self._extract_chords(gray, page.staff_regions, h, w)
+            chord_hits = self._extract_chords(gray, page.staff_regions, h, w)
 
         # ── 3. Indicaciones musicales (tempo, dinámica) ──
         indications = self._extract_indications(gray)
@@ -63,7 +72,8 @@ class OCREngine:
         full_text = self._ocr_clean(gray, psm=4)
 
         # ── Resultados ──
-        page.chords_found = list(dict.fromkeys(chords))
+        page.chord_boxes = chord_hits  # posiciones para anotar sobre el pentagrama
+        page.chords_found = list(dict.fromkeys(hit.text for hit in chord_hits))
         page.text_found = "\n".join(filter(None, [
             f"[Título/Encabezado] {top_text}" if top_text else "",
             f"[Acordes] {' | '.join(page.chords_found)}" if page.chords_found else "",
@@ -75,8 +85,13 @@ class OCREngine:
 
     def _extract_chords(self, gray: np.ndarray, regions: list,
                         img_h: int, img_w: int) -> list:
-        """Extrae acordes de la zona justo encima de cada pentagrama."""
-        chords = []
+        """Extrae acordes (con posición) de la zona encima de cada pentagrama.
+
+        Retorna una lista de :class:`ChordHit` con coordenadas en la resolución
+        completa de la imagen, para poder anotar cada acorde sobre su compás.
+        """
+        hits = []
+        scale = 2.5  # factor de ampliación del recorte antes del OCR
 
         for (rx, ry, rw, rh) in regions:
             # Escalar regiones (fueron detectadas en imagen escalada a 1000px)
@@ -96,23 +111,28 @@ class OCREngine:
             if chord_region.size == 0:
                 continue
 
-            # Preprocesar: escalar 2x + binarizar
-            chord_region = cv2.resize(chord_region, None, fx=2.5, fy=2.5,
+            # Preprocesar: ampliar + binarizar
+            chord_region = cv2.resize(chord_region, None, fx=scale, fy=scale,
                                       interpolation=cv2.INTER_CUBIC)
             _, chord_bin = cv2.threshold(chord_region, 0, 255,
                                          cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-            text = pytesseract.image_to_string(
+            # image_to_data devuelve la caja de cada palabra → conservamos posición.
+            data = pytesseract.image_to_data(
                 chord_bin,
                 lang='eng',
                 config='--psm 11 -c tessedit_char_whitelist='
-                       'ABCDEFGabcdefgmajdinus0123456789#b/ '
+                       'ABCDEFGabcdefgmajdinus0123456789#b/ ',
+                output_type=pytesseract.Output.DICT,
             )
 
-            found = self._parse_chords(text)
-            chords.extend(found)
+            for token, left, top in zip(data['text'], data['left'], data['top']):
+                for chord in self._parse_chords(token or ""):
+                    abs_x = int(x_start + left / scale)
+                    abs_y = int(y_start + top / scale)
+                    hits.append(ChordHit(text=chord, x=abs_x, y=abs_y))
 
-        return chords
+        return hits
 
     def _extract_indications(self, gray: np.ndarray) -> list:
         """Busca términos musicales italianos y dinámicas."""

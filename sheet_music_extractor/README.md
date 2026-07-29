@@ -15,9 +15,9 @@ El pipeline consta de las siguientes etapas:
 | --- | --- |
 | `downloader.py` | Descarga el vídeo con `yt-dlp` y obtiene sus metadatos. |
 | `frame_extractor.py` | `FrameExtractor`: extrae frames, detecta pentagramas y filtra páginas únicas (SSIM). Produce `PageResult`. |
-| `ocr_engine.py` | `OCREngine`: título, acordes, indicaciones de tempo/dinámica y texto (Tesseract). |
-| `annotator.py` | Rotula los acordes detectados como cabecera sobre cada página. |
-| `omr_engine.py` | (Opcional) Convierte cada página a MusicXML con `oemer`. |
+| `ocr_engine.py` | `OCREngine`: título, acordes (con posición), indicaciones de tempo/dinámica y texto (Tesseract). |
+| `annotator.py` | Rotula cada acorde en su posición sobre el pentagrama (respaldo: cabecera). |
+| `omr_engine.py` | (Opcional) `OMREngine`: página→MusicXML/MIDI con `oemer`, fusiona páginas y resume notas (`music21`). |
 | `comparator.py` | (Opcional) Compara la partitura reconocida con una de referencia (`musicdiff`). |
 | `pdf_generator.py` | Combina las páginas en un PDF a `pdf_dpi` con `img2pdf`. |
 | `pipeline.py` | Orquesta todas las etapas. |
