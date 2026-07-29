@@ -1,0 +1,16 @@
+# Salida generada por el pipeline
+sheet_music_extractor/output/
+sheet_music_extractor/**/downloads/
+sheet_music_extractor/**/frames/
+sheet_music_extractor/**/musicxml/
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# OS
+.DS_Store

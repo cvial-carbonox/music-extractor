@@ -1,0 +1,23 @@
+# ── Core ──
+yt-dlp>=2025.1.0
+opencv-python>=4.9.0
+numpy>=1.26.0
+Pillow>=10.2.0
+scikit-image>=0.22.0
+img2pdf>=0.5.1
+
+# ── OCR ──
+pytesseract>=0.3.10
+
+# ── OMR (Reconocimiento Óptico de Música) ──
+oemer>=0.1.8
+
+# ── Análisis musical y comparación ──
+music21>=9.1.0
+musicdiff>=5.2
+
+# ── Interfaz Web ──
+gradio>=4.44.0
+
+# ── Utilidades ──
+tqdm>=4.66.0
