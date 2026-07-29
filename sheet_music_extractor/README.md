@@ -15,11 +15,10 @@ El pipeline consta de las siguientes etapas:
 | --- | --- |
 | `downloader.py` | Descarga el vídeo con `yt-dlp` y obtiene sus metadatos. |
 | `frame_extractor.py` | `FrameExtractor`: extrae frames, detecta pentagramas y filtra páginas únicas (SSIM). Produce `PageResult`. |
-| `ocr_engine.py` | `OCREngine`: título, acordes (con posición), indicaciones de tempo/dinámica y texto (Tesseract). |
-| `annotator.py` | Rotula cada acorde en su posición sobre el pentagrama (respaldo: cabecera). |
+| `ocr_engine.py` | `OCREngine`: título, acordes, indicaciones de tempo/dinámica y texto (Tesseract). |
 | `omr_engine.py` | (Opcional) `OMREngine`: página→MusicXML/MIDI con `oemer`, fusiona páginas y resume notas (`music21`). |
 | `comparator.py` | (Opcional) `ScoreComparator`: diff visual/textual/OMR-NED (`musicdiff`) + precisión de notas/ritmo y similitud (`music21`). |
-| `pdf_generator.py` | Combina las páginas en un PDF a `pdf_dpi` con `img2pdf`. |
+| `pdf_generator.py` | `PDFGenerator`: recorta bordes, mejora la imagen, anota acordes, genera el PDF (`img2pdf`) y un reporte OCR. |
 | `pipeline.py` | Orquesta todas las etapas. |
 | `app.py` | Interfaz web con Gradio (punto de entrada). |
 | `config.py` | Configuración central del pipeline. |
@@ -27,11 +26,14 @@ El pipeline consta de las siguientes etapas:
 ### Flujo
 
 ```
-URL ─▶ Descarga ─▶ Extracción de páginas ─▶ OCR título + acordes ─▶ Anotación
-        (yt-dlp)   (estabilidad + pentagrama)                          │
-                              ┌────────────────────────────────────────┘
+URL ─▶ Descarga ─▶ Extracción de páginas ─▶ OCR (título + acordes + texto)
+        (yt-dlp)   (estabilidad + pentagrama)              │
+                              ┌───────────────────────────-─┘
                               ▼
-        OMR (oemer) ─▶ Comparación con referencia (opcional) ─▶ PDF
+        OMR (oemer) ─▶ Comparación con referencia (opcional)
+                              │
+                              ▼
+        Mejora + anotación de acordes ─▶ PDF + reporte OCR
 ```
 
 Una página sólo se captura cuando el frame ha sido **estable** durante
@@ -140,7 +142,6 @@ sheet_music_extractor/
 ├── downloader.py
 ├── frame_extractor.py
 ├── ocr_engine.py
-├── annotator.py
 ├── omr_engine.py
 ├── comparator.py
 ├── pdf_generator.py

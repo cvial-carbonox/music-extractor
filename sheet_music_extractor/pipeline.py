@@ -12,19 +12,17 @@ from __future__ import annotations
 
 import logging
 import re
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
 
-import annotator
 import downloader
-import pdf_generator
 from comparator import ScoreComparator
 from config import Config
 from frame_extractor import FrameExtractor, PageResult
 from ocr_engine import OCREngine
 from omr_engine import OMREngine
+from pdf_generator import PDFGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +59,7 @@ class PipelineResult:
     merged_midi: str = ""
     note_summary: dict = field(default_factory=dict)
     comparison: Optional[dict] = None
+    ocr_report: str = ""
 
 
 def _report(progress: ProgressCallback, fraction: float, message: str) -> None:
@@ -100,34 +99,19 @@ def run(
     if not pages:
         raise RuntimeError("No se detectó ninguna página de partitura en el vídeo.")
 
-    # Copia cada página seleccionada a pages_dir con numeración limpia.
-    for page in pages:
-        dest = config.pages_dir / f"page_{page.page_number:03d}.png"
-        shutil.copyfile(page.frame_path, dest)
-
-    # 3-4. OCR (título, acordes, indicaciones, texto) + anotación ----------
+    # 3. OCR (título, acordes, indicaciones, texto) ------------------------
     _report(progress, 0.55, "OCR de páginas…")
     ocr = OCREngine(config)
     title = ""
-    final_images: List[Path] = []
     for i, page in enumerate(pages, start=1):
         _report(progress, 0.55 + 0.10 * (i / len(pages)), f"OCR página {i}/{len(pages)}…")
-        page_img = config.pages_dir / f"page_{page.page_number:03d}.png"
-
         ocr.process_page(page)  # rellena page.chords_found y page.text_found
         if page.page_number == 1:
             title = _title_from_text(page.text_found)
         if page.chords_found:
             logger.info("Página %d: %d acordes", page.page_number, len(page.chords_found))
 
-        if config.detect_chords and config.annotate_chords:
-            out = config.annotated_dir / f"page_{page.page_number:03d}.png"
-            annotator.annotate_page(page_img, page, out, config)
-            final_images.append(out)
-        else:
-            final_images.append(page_img)
-
-    # 5. OMR (notas → MusicXML/MIDI) + fusión -------------------------------
+    # 4. OMR (notas → MusicXML/MIDI) + fusión -------------------------------
     musicxml_paths: List[Path] = []
     merged_musicxml = ""
     merged_midi = ""
@@ -152,7 +136,7 @@ def run(
             if Path(midi).exists():
                 merged_midi = midi
 
-    # 6. Comparación con la partitura de referencia ------------------------
+    # 5. Comparación con la partitura de referencia ------------------------
     comparison: Optional[dict] = None
     if config.reference_score_path:
         # Comparar la partitura fusionada (más significativa) o, en su defecto,
@@ -166,17 +150,18 @@ def run(
                 extracted, config.reference_score_path
             )
 
-    # 7. Generación del PDF -------------------------------------------------
-    _report(progress, 0.92, "Generando PDF…")
-    pdf_name = f"{title}.pdf" if title else "partitura.pdf"
-    pdf_path = config.base / pdf_name
-    pdf_generator.images_to_pdf(final_images, pdf_path, dpi=config.pdf_dpi)
+    # 6. Mejora de imagen + anotación + PDF + reporte OCR ------------------
+    _report(progress, 0.92, "Mejorando imágenes y generando PDF…")
+    pdfgen = PDFGenerator(config)
+    annotated_paths = [pdfgen.enhance_and_annotate(page) for page in pages]
+    pdf_path = pdfgen.generate_pdf(pages, annotated_paths)
+    ocr_report = pdfgen.save_ocr_report(pages)
 
     _report(progress, 1.0, "¡Listo!")
     return PipelineResult(
-        pdf_path=pdf_path,
+        pdf_path=Path(pdf_path),
         pages=pages,
-        final_images=final_images,
+        final_images=[Path(p) for p in annotated_paths],
         title=title,
         num_pages=len(pages),
         musicxml_paths=musicxml_paths,
@@ -184,4 +169,5 @@ def run(
         merged_midi=merged_midi,
         note_summary=note_summary,
         comparison=comparison,
+        ocr_report=ocr_report,
     )
