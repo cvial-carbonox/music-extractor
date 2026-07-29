@@ -1,13 +1,17 @@
 """
 pipeline.py — Orquestación del extractor de partituras.
 
-Etapas: descarga → extracción de páginas (con detección de pentagrama) →
-OCR (título + acordes) → anotación de acordes → OMR → comparación con
-referencia → generación del PDF.
+Etapas: descarga → extracción de frames → filtrado de páginas únicas
+(pentagrama + estabilidad) → OCR (título + acordes) → anotación → OMR →
+comparación con referencia → generación del PDF.
+
+La unidad de datos que fluye por el pipeline es ``PageResult``: cada etapa
+va rellenando sus campos (``chords_found``, ``omr_musicxml``…).
 """
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -15,12 +19,12 @@ from typing import Callable, List, Optional
 import annotator
 import comparator
 import downloader
-import frame_extractor
 import ocr_engine
 import omr_engine
 import pdf_generator
 from comparator import PageComparison
 from config import Config
+from frame_extractor import FrameExtractor, PageResult
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,7 @@ class PipelineResult:
     """Resultado de una ejecución completa del pipeline."""
 
     pdf_path: Path
-    page_paths: List[Path] = field(default_factory=list)
+    pages: List[PageResult] = field(default_factory=list)
     final_images: List[Path] = field(default_factory=list)
     title: str = ""
     num_pages: int = 0
@@ -67,56 +71,66 @@ def run(
     _report(progress, 0.05, "Descargando vídeo…")
     video_path = downloader.download_video(config)
 
-    # 2. Extracción de páginas ---------------------------------------------
-    _report(progress, 0.15, "Extrayendo páginas…")
+    # 2. Extracción de frames + filtrado de páginas ------------------------
+    _report(progress, 0.15, "Extrayendo frames…")
+    extractor = FrameExtractor(config)
+    frames = extractor.extract_frames(video_path)
 
-    def _extract_progress(frac: float, msg: str) -> None:
-        _report(progress, 0.15 + frac * 0.40, msg)  # tramo 15%–55%
-
-    pages = frame_extractor.extract_pages(video_path, config, progress=_extract_progress)
+    _report(progress, 0.50, "Filtrando páginas únicas…")
+    pages: List[PageResult] = extractor.filter_unique_pages(frames)
     if not pages:
         raise RuntimeError("No se detectó ninguna página de partitura en el vídeo.")
-    page_paths = frame_extractor.save_pages(pages, config.pages_dir)
+
+    # Copia cada página seleccionada a pages_dir con numeración limpia.
+    for page in pages:
+        dest = config.pages_dir / f"page_{page.page_number:03d}.png"
+        shutil.copyfile(page.frame_path, dest)
 
     # 3. OCR del título -----------------------------------------------------
-    title = ocr_engine.guess_title(page_paths[0], config)
+    title = ocr_engine.guess_title(pages[0].frame_path, config)
 
-    # 4. Detección y anotación de acordes ----------------------------------
-    final_images: List[Path] = list(page_paths)
-    if config.detect_chords:
-        _report(progress, 0.60, "Detectando acordes (OCR)…")
-        annotated: List[Path] = []
-        for i, (page_path, page) in enumerate(zip(page_paths, pages), start=1):
-            chords = ocr_engine.detect_chords(page.image, config)
-            if config.annotate_chords:
-                out = config.annotated_dir / f"page_{i:03d}.png"
-                annotator.annotate_page(page_path, chords, out, config)
-                annotated.append(out)
-            if chords:
-                logger.info("Página %d: %d acordes detectados", i, len(chords))
-        if config.annotate_chords and annotated:
-            final_images = annotated
+    # 4. Acordes (OCR) + anotación -----------------------------------------
+    final_images: List[Path] = []
+    for page in pages:
+        page_img = config.pages_dir / f"page_{page.page_number:03d}.png"
+
+        if config.detect_chords:
+            page.chords_found = ocr_engine.detect_chords(page_img, config)
+            if page.chords_found:
+                logger.info(
+                    "Página %d: %d acordes detectados",
+                    page.page_number, len(page.chords_found),
+                )
+
+        if config.detect_chords and config.annotate_chords:
+            _report(progress, 0.60, "Anotando acordes…")
+            out = config.annotated_dir / f"page_{page.page_number:03d}.png"
+            annotator.annotate_page(page_img, page.chords_found, out, config)
+            final_images.append(out)
+        else:
+            final_images.append(page_img)
 
     # 5. OMR ----------------------------------------------------------------
     musicxml_paths: List[Path] = []
-    omr_xmls: List[Optional[Path]] = []
     if config.enable_omr:
         _report(progress, 0.70, "Reconociendo notas (OMR)…")
-        for i, page_path in enumerate(page_paths, start=1):
+        for i, page in enumerate(pages, start=1):
             _report(
                 progress,
-                0.70 + 0.15 * (i / len(page_paths)),
-                f"OMR página {i}/{len(page_paths)}…",
+                0.70 + 0.15 * (i / len(pages)),
+                f"OMR página {i}/{len(pages)}…",
             )
-            xml = omr_engine.image_to_musicxml(page_path, config.omr_dir, config)
-            omr_xmls.append(xml)
+            page_img = config.pages_dir / f"page_{page.page_number:03d}.png"
+            xml = omr_engine.image_to_musicxml(page_img, config.omr_dir, config)
             if xml is not None:
+                page.omr_musicxml = str(xml)
                 musicxml_paths.append(xml)
 
     # 6. Comparación con referencia ----------------------------------------
     comparisons: Optional[List[PageComparison]] = None
-    if config.reference_score_path and omr_xmls:
+    if config.reference_score_path:
         _report(progress, 0.87, "Comparando con partitura de referencia…")
+        omr_xmls = [Path(p.omr_musicxml) if p.omr_musicxml else None for p in pages]
         comparisons = comparator.compare_to_reference(omr_xmls, config)
 
     # 7. Generación del PDF -------------------------------------------------
@@ -128,10 +142,10 @@ def run(
     _report(progress, 1.0, "¡Listo!")
     return PipelineResult(
         pdf_path=pdf_path,
-        page_paths=page_paths,
+        pages=pages,
         final_images=final_images,
         title=title,
-        num_pages=len(page_paths),
+        num_pages=len(pages),
         musicxml_paths=musicxml_paths,
         comparisons=comparisons,
     )

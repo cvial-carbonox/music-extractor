@@ -14,8 +14,8 @@ El pipeline consta de las siguientes etapas:
 | Módulo | Responsabilidad |
 | --- | --- |
 | `downloader.py` | Descarga el vídeo con `yt-dlp` y obtiene sus metadatos. |
-| `frame_extractor.py` | Muestrea a `fps_sample`, detecta frames estables y captura páginas (SSIM). |
-| `staff_detector.py` | Detecta los pentagramas (staff lines) de cada frame. |
+| `frame_extractor.py` | `FrameExtractor`: extrae frames, detecta pentagramas y filtra páginas únicas (SSIM). Produce `PageResult`. |
+| `staff_detector.py` | Detección de líneas de pentagrama usada por el OCR para ubicar la banda de acordes. |
 | `ocr_engine.py` | Reconoce el título y los símbolos de acorde con Tesseract. |
 | `annotator.py` | Dibuja los acordes detectados sobre cada página. |
 | `omr_engine.py` | (Opcional) Convierte cada página a MusicXML con `oemer`. |

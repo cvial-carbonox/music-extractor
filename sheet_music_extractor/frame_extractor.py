@@ -1,136 +1,237 @@
 """
-frame_extractor.py — Extracción de páginas de partitura desde el vídeo.
-
-Estrategia para vídeos tipo "pasa-páginas":
-
-1. Se muestrea a ``fps_sample`` fotogramas por segundo.
-2. Un frame se considera *estable* cuando se parece (SSIM) al frame muestreado
-   anterior. Tras ``min_stable_frames`` muestras estables consecutivas, el
-   frame es candidato a página (evita capturar transiciones borrosas).
-3. El candidato se acepta como página nueva sólo si contiene un pentagrama
-   (``staff_detector``) y difiere de la última página capturada.
+frame_extractor.py — Extracción de frames, detección de pentagrama
+y filtrado de páginas únicas (estáticas).
 """
-from __future__ import annotations
-
-import logging
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Callable, List, Optional
-
 import cv2
 import numpy as np
+from dataclasses import dataclass, field
+from pathlib import Path
 from skimage.metrics import structural_similarity as ssim
-
-import staff_detector
+from tqdm import tqdm
 from config import Config
-
-logger = logging.getLogger(__name__)
-
-ProgressCallback = Optional[Callable[[float, str], None]]
-
-# Tamaño reducido usado para las comparaciones SSIM (rápido y estable).
-COMPARE_SIZE = (320, 180)
 
 
 @dataclass
-class Page:
-    """Una página de partitura capturada del vídeo."""
-
-    index: int          # índice del frame en el vídeo original
-    timestamp: float    # segundos desde el inicio
-    image: np.ndarray   # imagen BGR
-
-    @property
-    def gray(self) -> np.ndarray:
-        return cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
-
-
-def _prepare(image: np.ndarray) -> np.ndarray:
-    """Convierte a gris reducido para comparar con SSIM."""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-    return cv2.resize(gray, COMPARE_SIZE, interpolation=cv2.INTER_AREA)
+class PageResult:
+    """Una página de partitura detectada."""
+    frame_path: str
+    page_number: int
+    timestamp_sec: float
+    staff_regions: list = field(default_factory=list)
+    chords_found: list = field(default_factory=list)
+    text_found: str = ""
+    omr_musicxml: str = ""
+    omr_midi: str = ""
 
 
-def _similar(a: np.ndarray, b: np.ndarray, threshold: float) -> bool:
-    return float(ssim(a, b)) > threshold
+class FrameExtractor:
 
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
 
-def extract_pages(
-    video_path: Path,
-    config: Config,
-    progress: ProgressCallback = None,
-) -> List[Page]:
-    """Extrae las páginas de partitura distintas de ``video_path``."""
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"No se pudo abrir el vídeo: {video_path}")
+    # ─────────────────────────────────────────────
+    # EXTRAER FRAMES DEL VIDEO
+    # ─────────────────────────────────────────────
+    def extract_frames(self, video_path: str) -> list:
+        """Extrae frames a la tasa configurada. Retorna [(path, timestamp), ...]."""
+        cap = cv2.VideoCapture(video_path)
+        video_fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = total_frames / video_fps
+        interval = max(1, int(video_fps / self.cfg.fps_sample))
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    step = max(int(round(fps / max(config.fps_sample, 0.01))), 1)
+        print(f"🎬 Video: {duration:.1f}s | {video_fps:.1f} FPS | {total_frames} frames")
+        print(f"📸 Muestreo: 1 cada {interval} frames → ~{duration * self.cfg.fps_sample:.0f} capturas")
 
-    config.frames_dir.mkdir(parents=True, exist_ok=True)
+        frames = []
+        count = 0
+        saved = 0
 
-    pages: List[Page] = []
-    prev_small: Optional[np.ndarray] = None       # muestra anterior
-    candidate: Optional[Page] = None              # frame estable en observación
-    last_page_small: Optional[np.ndarray] = None  # última página aceptada
-    stable_count = 0
-    idx = 0
-    sample_n = 0
-
-    try:
+        pbar = tqdm(total=total_frames, desc="Extrayendo", unit="frame")
         while True:
-            if not cap.grab():
+            ret, frame = cap.read()
+            if not ret:
                 break
-            if idx % step == 0:
-                ok, frame = cap.retrieve()
-                if ok and frame is not None:
-                    small = _prepare(frame)
 
-                    if prev_small is not None and _similar(prev_small, small, config.ssim_threshold):
-                        stable_count += 1
-                    else:
-                        stable_count = 1
-                        candidate = Page(index=idx, timestamp=idx / fps, image=frame)
-                    prev_small = small
+            if count % interval == 0:
+                timestamp = count / video_fps
+                path = str(self.cfg.frames_dir / f"f_{saved:05d}.png")
+                cv2.imwrite(path, frame)
+                frames.append((path, timestamp))
+                saved += 1
 
-                    # Guarda cada frame muestreado (útil para depurar).
-                    cv2.imwrite(str(config.frames_dir / f"frame_{sample_n:05d}.png"), frame)
-                    sample_n += 1
+            count += 1
+            pbar.update(1)
 
-                    # ¿Frame estable el tiempo suficiente y con pentagrama?
-                    if (
-                        candidate is not None
-                        and stable_count == config.min_stable_frames
-                        and staff_detector.has_staff(candidate.image, config)
-                    ):
-                        is_new = last_page_small is None or not _similar(
-                            last_page_small, small, config.ssim_threshold
-                        )
-                        if is_new:
-                            pages.append(candidate)
-                            last_page_small = small
-                            logger.info(
-                                "Página %d capturada en t=%.1fs", len(pages), candidate.timestamp
-                            )
-
-                if progress and total:
-                    progress(min(idx / total, 1.0), f"Extrayendo frames… ({len(pages)} páginas)")
-            idx += 1
-    finally:
+        pbar.close()
         cap.release()
+        print(f"✅ {saved} frames extraídos\n")
+        return frames
 
-    logger.info("Total de páginas capturadas: %d", len(pages))
-    return pages
+    # ─────────────────────────────────────────────
+    # DETECTAR PENTAGRAMA (5 líneas)
+    # ─────────────────────────────────────────────
+    def detect_staff(self, gray: np.ndarray) -> list:
+        """
+        Detecta regiones de pentagrama buscando 5 líneas horizontales
+        paralelas y equidistantes.
+        Retorna [(x, y, w, h), ...] en coordenadas de la imagen escalada.
+        """
+        h, w = gray.shape
 
+        # Binarización adaptativa (mejor que Otsu para partituras)
+        binary = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 15, 10
+        )
 
-def save_pages(pages: List[Page], out_dir: Path) -> List[Path]:
-    """Guarda cada página como PNG numerado y devuelve las rutas."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    paths: List[Path] = []
-    for i, page in enumerate(pages, start=1):
-        path = out_dir / f"page_{i:03d}.png"
-        cv2.imwrite(str(path), page.image)
-        paths.append(path)
-    return paths
+        # Kernel horizontal: detecta líneas largas
+        kernel_len = max(int(w * self.cfg.staff_line_min_width), 30)
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
+        lines_mask = cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel, iterations=1)
+
+        # Limpiar ruido vertical
+        lines_mask = cv2.dilate(lines_mask, np.ones((2, 1), np.uint8), iterations=1)
+
+        # Contornos de líneas
+        contours, _ = cv2.findContours(lines_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Filtrar: líneas largas y delgadas
+        min_width = int(w * self.cfg.staff_line_min_width)
+        staff_lines = []
+        for cnt in contours:
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            if cw >= min_width and ch < 8 and (cw / max(ch, 1)) > 10:
+                staff_lines.append((x, y, cw, ch))
+
+        if len(staff_lines) < self.cfg.min_staff_lines:
+            return []
+
+        # Agrupar líneas cercanas verticalmente → pentagramas
+        staff_lines.sort(key=lambda r: r[1])
+        groups = []
+        current_group = [staff_lines[0]]
+
+        for i in range(1, len(staff_lines)):
+            gap = staff_lines[i][1] - current_group[-1][1]
+            if gap < 45:  # Líneas del mismo pentagrama
+                current_group.append(staff_lines[i])
+            else:
+                if len(current_group) >= 4:
+                    groups.append(current_group)
+                current_group = [staff_lines[i]]
+
+        if len(current_group) >= 4:
+            groups.append(current_group)
+
+        # Bounding boxes de cada pentagrama
+        regions = []
+        for group in groups:
+            xs = [r[0] for r in group]
+            ys = [r[1] for r in group]
+            ws = [r[2] for r in group]
+            x = min(xs)
+            y = min(ys) - 20
+            w_max = max(ws)
+            h_total = (max(ys) - min(ys)) + 40
+            regions.append((x, y, w_max, h_total))
+
+        return regions
+
+    def has_sheet_music(self, frame_path: str) -> tuple:
+        """Retorna (tiene_partitura, regiones) para un frame."""
+        img = cv2.imread(frame_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return False, []
+
+        h, w = img.shape
+        scale = 1000 / max(h, w)
+        if scale < 1:
+            img = cv2.resize(img, (int(w * scale), int(h * scale)))
+
+        regions = self.detect_staff(img)
+        return len(regions) > 0, regions
+
+    # ─────────────────────────────────────────────
+    # FILTRAR PÁGINAS ÚNICAS (sin scroll)
+    # ─────────────────────────────────────────────
+    def filter_unique_pages(self, frames: list) -> list:
+        """
+        Para páginas estáticas:
+        - Detecta aparición de pentagrama
+        - Espera N frames estables (misma imagen)
+        - Captura la página cuando cambia a otra
+        """
+        print("🔍 Filtrando páginas únicas (modo estático)...")
+
+        pages: list[PageResult] = []
+        prev_gray = None
+        stable_count = 0
+        candidate = None
+        page_num = 0
+
+        for path, timestamp in tqdm(frames, desc="Analizando", unit="frame"):
+            has_music, regions = self.has_sheet_music(path)
+
+            if not has_music:
+                # Sin partitura → si teníamos candidata estable, guardarla
+                if stable_count >= self.cfg.min_stable_frames and candidate:
+                    page_num += 1
+                    pages.append(PageResult(
+                        frame_path=candidate[0],
+                        page_number=page_num,
+                        timestamp_sec=candidate[1],
+                        staff_regions=candidate[2],
+                    ))
+                stable_count = 0
+                candidate = None
+                prev_gray = None
+                continue
+
+            gray = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            gray_small = cv2.resize(gray, (640, 480))
+
+            if prev_gray is None:
+                prev_gray = gray_small
+                candidate = (path, timestamp, regions)
+                stable_count = 1
+                continue
+
+            score = ssim(prev_gray, gray_small)
+
+            if score > self.cfg.ssim_threshold:
+                # Misma página → acumular estabilidad
+                stable_count += 1
+                candidate = (path, timestamp, regions)  # Actualizar al más reciente
+            else:
+                # Nueva página → guardar anterior si era estable
+                if stable_count >= self.cfg.min_stable_frames and candidate:
+                    page_num += 1
+                    pages.append(PageResult(
+                        frame_path=candidate[0],
+                        page_number=page_num,
+                        timestamp_sec=candidate[1],
+                        staff_regions=candidate[2],
+                    ))
+
+                stable_count = 1
+                candidate = (path, timestamp, regions)
+
+            prev_gray = gray_small
+
+        # Última página
+        if stable_count >= self.cfg.min_stable_frames and candidate:
+            page_num += 1
+            pages.append(PageResult(
+                frame_path=candidate[0],
+                page_number=page_num,
+                timestamp_sec=candidate[1],
+                staff_regions=candidate[2],
+            ))
+
+        print(f"✅ {len(pages)} páginas únicas detectadas")
+        for p in pages:
+            print(f"   📄 Página {p.page_number} @ {p.timestamp_sec:.1f}s")
+        print()
+
+        return pages

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Union
 
+import cv2
 import numpy as np
 
 try:
@@ -94,17 +95,22 @@ def guess_title(image_path: Union[str, Path], config: Config) -> str:
     return ""
 
 
-def detect_chords(image: np.ndarray, config: Config) -> List[Chord]:
-    """Detecta acordes en la banda encima de cada pentagrama de ``image``.
+def detect_chords(frame_path: Union[str, Path], config: Config) -> List[Chord]:
+    """Detecta acordes en la banda encima de cada pentagrama de la página.
 
     Args:
-        image: frame BGR de una página.
+        frame_path: ruta a la imagen (PNG) de la página.
         config: configuración (``chord_region_offset``, ``ocr_languages``).
 
     Returns:
-        Lista de :class:`Chord` con texto y coordenadas absolutas.
+        Lista de :class:`Chord` con texto y coordenadas absolutas (en la
+        resolución de ``frame_path``, para poder anotarla directamente).
     """
     if not config.detect_chords or not is_available():
+        return []
+
+    image = cv2.imread(str(frame_path))
+    if image is None:
         return []
 
     info = staff_detector.detect(image, config)
