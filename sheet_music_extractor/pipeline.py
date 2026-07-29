@@ -59,11 +59,13 @@ def run(
         progress: Callback opcional ``(fraccion 0-1, mensaje)``.
     """
     config = config or Config()
+    if url:
+        config.youtube_url = url
     config.ensure_dirs()
 
     # 1. Descarga -----------------------------------------------------------
     _report(progress, 0.05, "Descargando vídeo…")
-    info = downloader.download_video(config, url=url)
+    video_path = downloader.download_video(config)
 
     # 2. Extracción de páginas ---------------------------------------------
     _report(progress, 0.15, "Extrayendo páginas…")
@@ -71,16 +73,13 @@ def run(
     def _extract_progress(frac: float, msg: str) -> None:
         _report(progress, 0.15 + frac * 0.40, msg)  # tramo 15%–55%
 
-    pages = frame_extractor.extract_pages(info.path, config, progress=_extract_progress)
+    pages = frame_extractor.extract_pages(video_path, config, progress=_extract_progress)
     if not pages:
         raise RuntimeError("No se detectó ninguna página de partitura en el vídeo.")
     page_paths = frame_extractor.save_pages(pages, config.pages_dir)
 
     # 3. OCR del título -----------------------------------------------------
-    title = info.title
-    guessed = ocr_engine.guess_title(page_paths[0], config)
-    if guessed:
-        title = guessed
+    title = ocr_engine.guess_title(page_paths[0], config)
 
     # 4. Detección y anotación de acordes ----------------------------------
     final_images: List[Path] = list(page_paths)
