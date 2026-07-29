@@ -1,5 +1,7 @@
 # Salida generada por el pipeline
-sheet_music_extractor/output/
+# app.py usa output_dir="output_XXXX" (sufijo por URL); output*/ los cubre.
+output*/
+sheet_music_extractor/output*/
 sheet_music_extractor/**/downloads/
 sheet_music_extractor/**/frames/
 sheet_music_extractor/**/musicxml/
