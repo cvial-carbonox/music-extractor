@@ -62,9 +62,11 @@ def process(
     summary = f"✅ {result.num_pages} página(s)"
     if result.title:
         summary += f" · {result.title}"
-    if result.comparisons:
-        total_diff = sum(c.num_differences for c in result.comparisons)
-        summary += f" · {total_diff} diferencia(s) vs. referencia"
+    if result.comparison:
+        note_cmp = result.comparison.get("note_comparison", {})
+        sim = note_cmp.get("sequence_similarity")
+        if sim is not None:
+            summary += f" · similitud {sim:.0%} vs. referencia"
     return str(result.pdf_path), gallery, summary
 
 

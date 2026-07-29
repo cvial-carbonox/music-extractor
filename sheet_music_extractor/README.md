@@ -18,7 +18,7 @@ El pipeline consta de las siguientes etapas:
 | `ocr_engine.py` | `OCREngine`: título, acordes (con posición), indicaciones de tempo/dinámica y texto (Tesseract). |
 | `annotator.py` | Rotula cada acorde en su posición sobre el pentagrama (respaldo: cabecera). |
 | `omr_engine.py` | (Opcional) `OMREngine`: página→MusicXML/MIDI con `oemer`, fusiona páginas y resume notas (`music21`). |
-| `comparator.py` | (Opcional) Compara la partitura reconocida con una de referencia (`musicdiff`). |
+| `comparator.py` | (Opcional) `ScoreComparator`: diff visual/textual/OMR-NED (`musicdiff`) + precisión de notas/ritmo y similitud (`music21`). |
 | `pdf_generator.py` | Combina las páginas en un PDF a `pdf_dpi` con `img2pdf`. |
 | `pipeline.py` | Orquesta todas las etapas. |
 | `app.py` | Interfaz web con Gradio (punto de entrada). |

@@ -18,10 +18,9 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 import annotator
-import comparator
 import downloader
 import pdf_generator
-from comparator import PageComparison
+from comparator import ScoreComparator
 from config import Config
 from frame_extractor import FrameExtractor, PageResult
 from ocr_engine import OCREngine
@@ -61,7 +60,7 @@ class PipelineResult:
     merged_musicxml: str = ""
     merged_midi: str = ""
     note_summary: dict = field(default_factory=dict)
-    comparisons: Optional[List[PageComparison]] = None
+    comparison: Optional[dict] = None
 
 
 def _report(progress: ProgressCallback, fraction: float, message: str) -> None:
@@ -154,16 +153,18 @@ def run(
                 merged_midi = midi
 
     # 6. Comparación con la partitura de referencia ------------------------
-    comparisons: Optional[List[PageComparison]] = None
+    comparison: Optional[dict] = None
     if config.reference_score_path:
-        _report(progress, 0.87, "Comparando con partitura de referencia…")
         # Comparar la partitura fusionada (más significativa) o, en su defecto,
-        # las páginas reconocidas individualmente.
-        if merged_musicxml:
-            omr_xmls: List[Optional[Path]] = [Path(merged_musicxml)]
-        else:
-            omr_xmls = [Path(p.omr_musicxml) if p.omr_musicxml else None for p in pages]
-        comparisons = comparator.compare_to_reference(omr_xmls, config)
+        # la primera página reconocida por OMR.
+        extracted = merged_musicxml or next(
+            (p.omr_musicxml for p in pages if p.omr_musicxml), ""
+        )
+        if extracted:
+            _report(progress, 0.87, "Comparando con partitura de referencia…")
+            comparison = ScoreComparator(config).compare(
+                extracted, config.reference_score_path
+            )
 
     # 7. Generación del PDF -------------------------------------------------
     _report(progress, 0.92, "Generando PDF…")
@@ -182,5 +183,5 @@ def run(
         merged_musicxml=merged_musicxml,
         merged_midi=merged_midi,
         note_summary=note_summary,
-        comparisons=comparisons,
+        comparison=comparison,
     )
