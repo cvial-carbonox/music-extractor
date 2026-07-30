@@ -137,11 +137,11 @@ class ScoreComparator:
                     ned_path.write_text(json.dumps(ned_data, indent=2), encoding='utf-8')
                     print(f"   📊 OMR-NED: {ned_path.name}")
 
-                    # Mostrar métricas clave
+                    # Mostrar métricas clave (musicdiff las devuelve como strings)
                     if isinstance(ned_data, dict):
-                        for key in ['ned', 'precision', 'recall', 'f1']:
+                        for key in ('OMR-NED', 'OMR-ED', 'numSymbolsInBoth'):
                             if key in ned_data:
-                                print(f"      {key}: {ned_data[key]:.4f}")
+                                print(f"      {key}: {ned_data[key]}")
                 except json.JSONDecodeError:
                     pass
 
