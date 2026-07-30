@@ -53,13 +53,15 @@ class ScoreComparator:
     def _run_musicdiff(self, file1: str, file2: str) -> dict:
         """Ejecuta musicdiff para diff visual y textual."""
         output = {}
-        include_args = ",".join(self.cfg.comparison_details)
+        # musicdiff espera -i como lista de choices separados (nargs='*'),
+        # no una sola cadena unida por comas.
+        include_args = list(self.cfg.comparison_details)
 
         # ── Diff visual (PDF) ──
         try:
             visual_cmd = [
                 "python3", "-m", "musicdiff",
-                "-i", include_args,
+                "-i", *include_args,
                 "-o", "visual",
                 "--", file1, file2,
             ]
@@ -90,7 +92,7 @@ class ScoreComparator:
         try:
             text_cmd = [
                 "python3", "-m", "musicdiff",
-                "-i", include_args,
+                "-i", *include_args,
                 "-o", "text",
                 "--", file1, file2,
             ]
@@ -115,7 +117,7 @@ class ScoreComparator:
         try:
             ned_cmd = [
                 "python3", "-m", "musicdiff",
-                "-i", include_args,
+                "-i", *include_args,
                 "-o", "omrned",
                 "--", file1, file2,
             ]
